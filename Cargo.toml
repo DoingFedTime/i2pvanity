@@ -1,0 +1,34 @@
+[package]
+name = "i2pvanity"
+version = "0.1.0"
+edition = "2021"
+description = "Fast I2P (.b32.i2p) vanity address generator"
+license = "MIT OR Apache-2.0"
+repository = "https://sambent.dev/sam/i2pvanity"
+readme = "README.md"
+keywords = ["i2p", "vanity", "eepsite", "elgamal", "ed25519"]
+categories = ["cryptography", "command-line-utilities"]
+
+[lib]
+name = "i2p_vanity"
+path = "src/lib.rs"
+
+[[bin]]
+name = "i2pvanity"
+path = "src/main.rs"
+
+[dependencies]
+crypto-bigint = { version = "0.6", features = ["rand_core", "zeroize"] }
+ed25519-dalek = { version = "2", features = ["rand_core", "zeroize"] }
+sha2 = "0.10"
+data-encoding = "2"
+rand = "0.8"
+rand_core = "0.6"
+zeroize = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

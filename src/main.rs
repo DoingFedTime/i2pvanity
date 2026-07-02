@@ -87,7 +87,31 @@ fn check_writable(path: &str) -> Result<(), String> {
     if !meta.is_dir() {
         return Err(format!("{} is not a directory", dir.display()));
     }
-    Ok(())
+    // Actually prove we can write, before spending minutes (or hours) searching:
+    // create and remove the exact temp file write_dat will use. Catches
+    // read-only directories, permission problems, and full filesystems up front
+    // instead of panicking on the write after a key has already been found.
+    let tmp = tmp_path(path);
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&tmp)
+    {
+        Ok(_) => {
+            std::fs::remove_file(&tmp).ok();
+            Ok(())
+        }
+        Err(e) => Err(format!("{tmp}: {e}")),
+    }
+}
+
+// The temp file write_dat writes to before the atomic rename. Made
+// process-unique so two concurrent runs writing the same output path don't
+// clobber each other's temp file. Kept in one place so check_writable probes
+// the same style of path the real write will use.
+fn tmp_path(path: &str) -> String {
+    format!("{path}.{}.tmp", std::process::id())
 }
 
 fn usage() {
@@ -175,7 +199,21 @@ fn run_generate(matcher: &Matcher, prefix: &str, threads: usize, out: &str, uid:
                 elapsed.as_secs_f64(),
                 rate
             );
-            write_dat(out, &f.dat, uid, gid);
+            if let Err(e) = write_dat(out, &f.dat, uid, gid) {
+                // The search succeeded - a long one may have cost hours - so the
+                // key must not be lost just because the write failed. Dump it as
+                // hex to stderr so it can be recovered (`xxd -r -p > key.dat`),
+                // and exit non-zero instead of panicking.
+                eprintln!("ERROR: could not write '{out}': {e}");
+                eprintln!(
+                    "The generated key was NOT saved. Recover it from this hex \
+                     (xxd -r -p > eepsite.dat):"
+                );
+                let hex: String = f.dat.iter().map(|b| format!("{b:02x}")).collect();
+                eprintln!("{hex}");
+                println!("{}", f.address);
+                std::process::exit(1);
+            }
             println!("{}", f.address);
         }
         None => {
@@ -223,30 +261,36 @@ fn run_bench(matcher: &Matcher, prefix: &str, threads: usize, seconds: u64) {
 }
 
 #[cfg(unix)]
-fn write_dat(path: &str, dat: &[u8], uid: u32, gid: u32) {
+fn write_dat(path: &str, dat: &[u8], uid: u32, gid: u32) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
-    let tmp = format!("{path}.tmp");
+    let tmp = tmp_path(path);
     let mut f = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .mode(0o600)
-        .open(&tmp)
-        .expect("open tmp");
-    f.write_all(dat).expect("write");
-    f.sync_all().ok();
-    std::fs::rename(&tmp, path).expect("rename");
+        .open(&tmp)?;
+    if let Err(e) = f.write_all(dat).and_then(|()| {
+        f.sync_all().ok();
+        std::fs::rename(&tmp, path)
+    }) {
+        // Don't leave a half-written temp file behind.
+        std::fs::remove_file(&tmp).ok();
+        return Err(e);
+    }
     if uid != 0 || gid != 0 {
         if let Err(e) = std::os::unix::fs::chown(path, Some(uid), Some(gid)) {
             eprintln!("warning: could not chown {path} to {uid}:{gid}: {e}");
         }
     }
     eprintln!("wrote {path} ({} bytes, mode 0600)", dat.len());
+    Ok(())
 }
 
 #[cfg(not(unix))]
-fn write_dat(path: &str, dat: &[u8], _uid: u32, _gid: u32) {
-    std::fs::write(path, dat).expect("write");
+fn write_dat(path: &str, dat: &[u8], _uid: u32, _gid: u32) -> std::io::Result<()> {
+    std::fs::write(path, dat)?;
     eprintln!("wrote {path} ({} bytes)", dat.len());
+    Ok(())
 }

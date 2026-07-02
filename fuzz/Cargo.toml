@@ -1,0 +1,28 @@
+[package]
+name = "i2pvanity-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.i2pvanity]
+path = ".."
+
+[[bin]]
+name = "matcher"
+path = "fuzz_targets/matcher.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse_args"
+path = "fuzz_targets/parse_args.rs"
+test = false
+doc = false
+bench = false

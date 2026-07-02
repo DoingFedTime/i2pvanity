@@ -15,6 +15,8 @@ use sha2::{Digest, Sha256};
 // to the .dat format is caught by these tests.
 const DEST_LEN: usize = 391;
 const ELG_PUB_LEN: usize = 256;
+const ED_PUB_OFF: usize = 352;
+const ED_PRIV_OFF: usize = DEST_LEN + 256; // 647
 const DAT_LEN: usize = DEST_LEN + 256 + 32;
 
 fn address_of(dest: &[u8]) -> String {
@@ -98,6 +100,86 @@ fn hit_is_valid_and_addresses_match() {
             recomputed, y,
             "stored x is not the discrete log of stored y"
         );
+    }
+}
+
+/// The stored Ed25519 private key must actually be the private half of the
+/// published identity. This is what makes an eepsite *function*: i2pd signs its
+/// LeaseSet with this private key, and every client verifies that signature
+/// against the public key baked into the .b32.i2p address. If they don't match,
+/// the address exists but no one can ever reach the service.
+#[test]
+fn stored_signing_key_matches_published_identity() {
+    use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
+
+    for prefix in ["a", "b2", "sam"] {
+        let matcher = Matcher::new(prefix).unwrap();
+        let params = monty_params();
+        let mut rng = rand::rngs::OsRng;
+        let found = run_worker(&matcher, &params, &mut rng, || false)
+            .hit
+            .expect("short prefix must hit");
+
+        // ed_pub is the identity as published inside the Destination/address.
+        let ed_pub: [u8; 32] = found.dat[ED_PUB_OFF..ED_PUB_OFF + 32].try_into().unwrap();
+        // ed_priv is what i2pd will load and sign with.
+        let ed_priv: [u8; 32] = found.dat[ED_PRIV_OFF..ED_PRIV_OFF + 32].try_into().unwrap();
+
+        // The private key must derive exactly the published public key.
+        let sk = SigningKey::from_bytes(&ed_priv);
+        assert_eq!(
+            sk.verifying_key().to_bytes(),
+            ed_pub,
+            "stored Ed25519 private key does not derive the published identity for '{prefix}'"
+        );
+
+        // And a real signature made with the private key must verify against the
+        // published public key - the exact operation i2pd/clients perform on a
+        // LeaseSet. Test a few messages including empty and long.
+        let vk = VerifyingKey::from_bytes(&ed_pub).expect("published pubkey must be valid");
+        for msg in [b"".as_slice(), b"leaseset", &[0xABu8; 512]] {
+            let sig = sk.sign(msg);
+            vk.verify(msg, &sig)
+                .unwrap_or_else(|e| panic!("signature did not verify for '{prefix}': {e}"));
+        }
+    }
+}
+
+/// SECURITY: the stored ElGamal private exponent must be high-entropy. It is
+/// seeded from `random_mod(p)` (~2048 bits) and only walked upward, so a real
+/// key's exponent is always enormous. A regression that collapsed it to a small,
+/// guessable value (e.g. the RNG stuck, or the `x == 0` guard inverted so x
+/// becomes 1) would produce a discrete-log-breakable key that still *looks*
+/// valid - the address resolves, i2pd loads it - but is trivially deanonymizable.
+/// This test refuses any exponent below 2^1024 (false-failure odds ~2^-1024) and
+/// checks two independent runs don't repeat the exponent (stuck-RNG guard).
+#[test]
+fn elgamal_exponent_is_high_entropy() {
+    let params = monty_params();
+    let matcher = Matcher::new("a").unwrap();
+
+    let mut seen: Vec<U2048> = Vec::new();
+    for _ in 0..3 {
+        let mut rng = rand::rngs::OsRng;
+        let found = run_worker(&matcher, &params, &mut rng, || false)
+            .hit
+            .expect("must hit");
+        let x_bytes: [u8; 256] = found.dat[DEST_LEN..DEST_LEN + 256].try_into().unwrap();
+
+        // The top 128 bytes must not be all zero - i.e. x >= 2^1024. A weak/stuck
+        // exponent (1, small counter, etc.) fails here.
+        assert!(
+            x_bytes[..128].iter().any(|&b| b != 0),
+            "ElGamal exponent is suspiciously small (< 2^1024): weak key. bytes[..16]={:02x?}",
+            &x_bytes[..16]
+        );
+
+        let x = U2048::from_be_slice(&x_bytes);
+        assert!(
+            !seen.contains(&x),
+            "two runs produced the same ElGamal exponent - RNG appears stuck"
+        );
+        seen.push(x);
     }
 }
 

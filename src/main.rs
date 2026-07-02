@@ -201,17 +201,28 @@ fn run_generate(matcher: &Matcher, prefix: &str, threads: usize, out: &str, uid:
             );
             if let Err(e) = write_dat(out, &f.dat, uid, gid) {
                 // The search succeeded - a long one may have cost hours - so the
-                // key must not be lost just because the write failed. Dump it as
-                // hex to stderr so it can be recovered (`xxd -r -p > key.dat`),
-                // and exit non-zero instead of panicking.
+                // key must not be lost just because the write failed. Recover by
+                // writing it (mode 0600) to a fallback location instead. We never
+                // print the private key to stderr: on a security tool that would
+                // leak it into the journal, scrollback or log files.
                 eprintln!("ERROR: could not write '{out}': {e}");
-                eprintln!(
-                    "The generated key was NOT saved. Recover it from this hex \
-                     (xxd -r -p > eepsite.dat):"
-                );
-                let hex: String = f.dat.iter().map(|b| format!("{b:02x}")).collect();
-                eprintln!("{hex}");
-                println!("{}", f.address);
+                match save_fallback(&f.dat, &f.address, uid, gid) {
+                    Some(path) => {
+                        eprintln!("Recovered: wrote the key to '{path}' (mode 0600) instead.");
+                        println!("{}", f.address);
+                    }
+                    None => {
+                        // Nowhere writable at all. Don't lose the key silently and
+                        // don't leak it: exit non-zero with a clear message. The
+                        // key stays only in the exiting process's memory.
+                        eprintln!(
+                            "FATAL: could not save the key to any location. \
+                             Free some disk / fix permissions and re-run. \
+                             The key was NOT written anywhere and is not recoverable."
+                        );
+                        std::process::exit(1);
+                    }
+                }
                 std::process::exit(1);
             }
             println!("{}", f.address);
@@ -258,6 +269,29 @@ fn run_bench(matcher: &Matcher, prefix: &str, threads: usize, seconds: u64) {
         rate / threads as f64
     );
     println!("{rate:.0}");
+}
+
+// When the requested output path can't be written, try to save the key to a
+// fallback location (mode 0600) so it isn't lost. Returns the path it landed in,
+// or None if every candidate failed. Never emits the key to stdout/stderr.
+fn save_fallback(dat: &[u8], address: &str, uid: u32, gid: u32) -> Option<String> {
+    // Address is a safe, unique-per-key filename component (base32, no slashes).
+    let name = format!("{address}.dat");
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join(&name));
+    }
+    candidates.push(std::env::temp_dir().join(&name));
+    if let Some(home) = std::env::var_os("HOME") {
+        candidates.push(std::path::PathBuf::from(home).join(&name));
+    }
+    for cand in candidates {
+        let p = cand.to_string_lossy().into_owned();
+        if write_dat(&p, dat, uid, gid).is_ok() {
+            return Some(p);
+        }
+    }
+    None
 }
 
 #[cfg(unix)]

@@ -1,7 +1,9 @@
 //! i2pvanity CLI.
 //!
-//!   i2pvanity <prefix> --out <path> [--threads N]
-//!   i2pvanity <prefix> --bench [--seconds N] [--threads N]
+//! ```text
+//! i2pvanity <prefix> --out <path> [--threads N]
+//! i2pvanity <prefix> --bench [--seconds N] [--threads N]
+//! ```
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -72,6 +74,11 @@ fn main() {
 
 fn check_writable(path: &str) -> Result<(), String> {
     let p = std::path::Path::new(path);
+    // Reject a target that is itself an existing directory: otherwise the final
+    // rename would fail and panic *after* the whole search has run.
+    if p.is_dir() {
+        return Err(format!("{} is a directory", p.display()));
+    }
     let dir = p
         .parent()
         .filter(|d| !d.as_os_str().is_empty())

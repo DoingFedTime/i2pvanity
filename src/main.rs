@@ -92,10 +92,12 @@ fn check_writable(path: &str) -> Result<(), String> {
     // read-only directories, permission problems, and full filesystems up front
     // instead of panicking on the write after a key has already been found.
     let tmp = tmp_path(path);
+    // create_new (O_CREAT|O_EXCL) so a symlink pre-planted at the staging path is
+    // NOT followed - see write_dat for the full rationale.
+    std::fs::remove_file(&tmp).ok();
     match std::fs::OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .open(&tmp)
     {
         Ok(_) => {
@@ -299,10 +301,17 @@ fn write_dat(path: &str, dat: &[u8], uid: u32, gid: u32) -> std::io::Result<()> 
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     let tmp = tmp_path(path);
+    // This can run as root over a directory other users can write to (for
+    // example a container bind mount). A plain create/truncate open follows
+    // symlinks, so a planted `<path>.<pid>.tmp -> /victim` would redirect the
+    // write and overwrite an arbitrary file. Remove any prior entry (that drops
+    // a planted symlink without touching its target), then create_new
+    // (O_CREAT|O_EXCL), which fails with EEXIST if the path is a symlink, so a
+    // re-plant in the window between the two calls fails closed.
+    std::fs::remove_file(&tmp).ok();
     let mut f = std::fs::OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .mode(0o600)
         .open(&tmp)?;
     if let Err(e) = f.write_all(dat).and_then(|()| {
@@ -314,7 +323,12 @@ fn write_dat(path: &str, dat: &[u8], uid: u32, gid: u32) -> std::io::Result<()> 
         return Err(e);
     }
     if uid != 0 || gid != 0 {
-        if let Err(e) = std::os::unix::fs::chown(path, Some(uid), Some(gid)) {
+        // chown the fd we hold (fchown), not the path. chown(2) follows
+        // symlinks: after the rename, someone who can write the directory could
+        // swap `path` for a symlink and a path-based chown would change the
+        // owner of the target. `f` still refers to the inode we created, so
+        // fchown can only ever touch that one.
+        if let Err(e) = std::os::unix::fs::fchown(&f, Some(uid), Some(gid)) {
             eprintln!("warning: could not chown {path} to {uid}:{gid}: {e}");
         }
     }

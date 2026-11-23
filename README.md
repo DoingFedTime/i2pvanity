@@ -101,6 +101,17 @@ The `.dat` is your private key, written in plaintext (i2pd needs it that way) at
 mode `0600`. In-memory key material is zeroized on drop. The tool makes no
 network connections.
 
+## Development
+
+```
+cargo test
+```
+
+The tests check generated keys against an independent SHA-256/base32 derivation,
+confirm the stored Ed25519 key signs for the published identity, and drive the
+CLI end to end. `fuzz/` holds cargo-fuzz targets for the prefix matcher and the
+argument parser (`cargo fuzz run matcher`, needs a nightly toolchain).
+
 ## License
 
 MIT OR Apache-2.0.

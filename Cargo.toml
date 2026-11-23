@@ -1,6 +1,6 @@
 [package]
 name = "i2pvanity"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Fast I2P (.b32.i2p) vanity address generator"
 license = "MIT OR Apache-2.0"
